@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Classroom Image Sync</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 16px/1.65 system-ui, -apple-system, "Segoe UI", sans-serif;
+         max-width: 680px; margin: 0 auto; padding: 48px 24px; }
+  h1 { font-size: 26px; margin: 0 0 6px; }
+  .sub { opacity: .7; margin: 0 0 32px; }
+  h2 { font-size: 18px; margin: 32px 0 8px; }
+  code { font-family: ui-monospace, Consolas, monospace; font-size: 14px;
+         background: color-mix(in srgb, currentColor 9%, transparent);
+         padding: 1px 5px; border-radius: 4px; }
+  ul { padding-left: 20px; }
+  footer { margin-top: 40px; padding-top: 20px; font-size: 14px; opacity: .7;
+           border-top: 1px solid color-mix(in srgb, currentColor 15%, transparent); }
+  a { color: #0a68d1; }
+</style>
+</head>
+<body>
+
+<h1>Classroom Image Sync</h1>
+<p class="sub">A personal command-line tool that saves image attachments from a Google Classroom course to a local folder.</p>
+
+<h2>What it does</h2>
+<p>
+  Google Classroom has no way to bulk-download the pictures posted to a course.
+  This tool lists the announcements, course-work materials and assignments in a
+  single course, finds the Google Drive files attached to them, and downloads
+  the images to a folder on the computer it runs on. It keeps a record of which
+  files it has already fetched, so it can run on a schedule and only pick up
+  what is new.
+</p>
+
+<h2>Who it is for</h2>
+<p>
+  It is a single-user utility, run from the command line by the person who owns
+  the Google account. There is no hosted service, no website to sign in to, and
+  no shared instance. It runs entirely on the user's own machine.
+</p>
+
+<h2>What access it asks for</h2>
+<p>It requests read-only permission, and nothing more:</p>
+<ul>
+  <li><code>classroom.courses.readonly</code> — read the course name</li>
+  <li><code>classroom.announcements.readonly</code> — list announcements</li>
+  <li><code>classroom.courseworkmaterials.readonly</code> — list materials</li>
+  <li><code>classroom.coursework.me.readonly</code> — list assignments</li>
+  <li><code>drive.readonly</code> — download the attached image files</li>
+</ul>
+<p>
+  It cannot post, edit, delete or share anything. The Drive scope is needed
+  because Classroom attachments are stored as Drive files; the narrower
+  <code>drive.file</code> scope only covers files an app created itself, which
+  never includes attachments posted by someone else.
+</p>
+
+<h2>Privacy</h2>
+<p>See the <a href="privacy.html">privacy policy</a>.</p>
+
+<footer>
+  Personal open-source project. Contact: <a href="mailto:antipyrrhus@gmail.com">antipyrrhus@gmail.com</a>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,4 @@
+{
+  "_comment": "Copy this file to config.json and fill in course_id. config.json is gitignored. To find the ID, take the slug from your Classroom URL (classroom.google.com/c/<slug>) and base64-decode it: [Convert]::FromBase64String('<slug>') in PowerShell yields the numeric course ID.",
+  "course_id": ""
+}

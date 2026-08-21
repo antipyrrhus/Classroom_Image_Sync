@@ -1,0 +1,399 @@
+"""Google Classroom -> local image sync.
+
+Walks every post in a Classroom course (announcements, course-work materials
+and assignments), collects the Drive files attached to them, and downloads the
+images to a local folder.
+
+A manifest of already-downloaded Drive file IDs makes repeat runs incremental,
+so a weekly scheduled run only fetches what is new.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+from google.auth.exceptions import RefreshError
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from googleapiclient.http import MediaIoBaseDownload
+
+# classroom.courseworkmaterials.readonly is the scope name verified against the
+# courses.courseWorkMaterials.list reference -- note it is all one lowercase
+# word, not "courseWorkMaterials".
+SCOPES = [
+    "https://www.googleapis.com/auth/classroom.courses.readonly",
+    "https://www.googleapis.com/auth/classroom.announcements.readonly",
+    "https://www.googleapis.com/auth/classroom.courseworkmaterials.readonly",
+    "https://www.googleapis.com/auth/classroom.coursework.me.readonly",
+    "https://www.googleapis.com/auth/drive.readonly",
+]
+
+# The course ID identifies a real class, so it lives in a gitignored config file
+# rather than in the source. Nothing in the public repo points at an actual course.
+CONFIG_FILE = "config.json"
+
+EXIT_OK = 0
+EXIT_ERROR = 1
+EXIT_AUTH_REQUIRED = 2
+
+log = logging.getLogger("classroom-sync")
+
+
+# --------------------------------------------------------------------------
+# configuration
+# --------------------------------------------------------------------------
+
+def resolve_course_id(args, root: Path) -> str:
+    """Find the course ID from --course-id, the environment, or config.json."""
+    if args.course_id:
+        return args.course_id.strip()
+
+    env = os.environ.get("CLASSROOM_COURSE_ID", "").strip()
+    if env:
+        return env
+
+    path = root / CONFIG_FILE
+    if path.exists():
+        try:
+            value = str(json.loads(path.read_text(encoding="utf-8")).get("course_id", "")).strip()
+        except ValueError as exc:
+            raise ValueError(f"{path} is not valid JSON: {exc}") from exc
+        if value:
+            return value
+
+    raise ValueError(
+        f"No course ID configured. Copy config.example.json to {CONFIG_FILE} and "
+        "set course_id, or pass --course-id, or set CLASSROOM_COURSE_ID. "
+        "The ID is the base64-decoded slug from the Classroom URL: for "
+        "classroom.google.com/c/ABCdEF123 decode 'ABCdEF123'."
+    )
+
+
+# --------------------------------------------------------------------------
+# auth
+# --------------------------------------------------------------------------
+
+def load_credentials(root: Path, allow_browser: bool) -> Credentials:
+    """Return usable credentials, refreshing or re-consenting as needed."""
+    secret_path = root / "client_secret.json"
+    token_path = root / "state" / "token.json"
+    creds = None
+
+    if token_path.exists():
+        try:
+            creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+        except ValueError as exc:
+            log.warning("Stored token unreadable (%s); re-authorising.", exc)
+            creds = None
+
+    # A token minted before SCOPES changed will refresh happily but 403 on the
+    # new APIs, so treat a scope mismatch as "no token".
+    if creds and not creds.has_scopes(SCOPES):
+        log.warning("Stored token is missing required scopes; re-authorising.")
+        creds = None
+
+    if creds and creds.valid:
+        return creds
+
+    if creds and creds.expired and creds.refresh_token:
+        try:
+            creds.refresh(Request())
+            _save_token(token_path, creds)
+            return creds
+        except RefreshError as exc:
+            log.warning("Refresh failed (%s).", exc)
+            log.warning(
+                "If the consent screen is still in Testing status this is "
+                "expected: those refresh tokens die 7 days after consent."
+            )
+            creds = None
+
+    if not allow_browser:
+        raise PermissionError(
+            "Interactive consent required but --no-browser was set. "
+            f"Run this script manually once to refresh {token_path}."
+        )
+
+    if not secret_path.exists():
+        raise FileNotFoundError(
+            f"{secret_path} not found. Download the OAuth desktop-client JSON "
+            "from the Google Cloud console and save it there (see README)."
+        )
+
+    flow = InstalledAppFlow.from_client_secrets_file(str(secret_path), SCOPES)
+    creds = flow.run_local_server(port=0)
+    _save_token(token_path, creds)
+    return creds
+
+
+def _save_token(token_path: Path, creds: Credentials) -> None:
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    token_path.write_text(creds.to_json(), encoding="utf-8")
+    # Credentials are user-only; keep them out of any inherited group ACL.
+    log.debug("Saved token to %s", token_path)
+
+
+# --------------------------------------------------------------------------
+# classroom traversal
+# --------------------------------------------------------------------------
+
+# (label, accessor, response field). The courseWorkMaterials list response
+# names its array "courseWorkMaterial" -- singular -- unlike the other two.
+POST_SOURCES = [
+    ("announcement", lambda svc: svc.courses().announcements(), "announcements"),
+    ("material", lambda svc: svc.courses().courseWorkMaterials(), "courseWorkMaterial"),
+    ("assignment", lambda svc: svc.courses().courseWork(), "courseWork"),
+]
+
+
+def _paged(collection, field: str, **kwargs):
+    """Yield every item across all pages of a Classroom list endpoint."""
+    page_token = None
+    while True:
+        response = collection.list(pageSize=100, pageToken=page_token, **kwargs).execute()
+        yield from response.get(field, [])
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            return
+
+
+def iter_attachments(classroom, course_id: str):
+    """Yield (post_label, post_title, post_date, drive_file) for every Drive attachment."""
+    for label, accessor, field in POST_SOURCES:
+        try:
+            posts = list(_paged(accessor(classroom), field, courseId=course_id))
+        except HttpError as exc:
+            # A missing scope or a role that cannot see this collection should
+            # not sink the whole run -- the other two sources may still work.
+            log.warning("Could not list %ss: %s", label, _http_reason(exc))
+            continue
+
+        log.info("Found %d %s(s).", len(posts), label)
+        for post in posts:
+            title = post.get("title") or post.get("text") or ""
+            date = (post.get("creationTime") or "")[:10] or "undated"
+            for material in post.get("materials", []):
+                drive_file = material.get("driveFile", {}).get("driveFile")
+                if drive_file and drive_file.get("id"):
+                    yield label, title, date, drive_file
+
+
+# --------------------------------------------------------------------------
+# downloading
+# --------------------------------------------------------------------------
+
+_ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def slugify(text: str, limit: int = 40) -> str:
+    cleaned = _ILLEGAL.sub("", (text or "").strip())
+    cleaned = re.sub(r"\s+", "-", cleaned).strip("-. ")
+    return cleaned[:limit] or "untitled"
+
+
+def build_filename(date: str, title: str, original: str) -> str:
+    """Compose a sortable, Windows-safe filename capped well under MAX_PATH."""
+    stem = Path(original).stem
+    suffix = Path(original).suffix or ".bin"
+    name = f"{date}_{slugify(title)}_{slugify(stem, 60)}"
+    return name[:110] + suffix
+
+
+def download_drive_file(drive, file_id: str, dest: Path) -> int:
+    """Stream a Drive file to disk, writing via .part so partials are never final."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".part")
+    request = drive.files().get_media(fileId=file_id, supportsAllDrives=True)
+    with tmp.open("wb") as handle:
+        downloader = MediaIoBaseDownload(handle, request, chunksize=1024 * 1024)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+    tmp.replace(dest)
+    return dest.stat().st_size
+
+
+def _http_reason(exc: HttpError) -> str:
+    status = getattr(exc.resp, "status", "?")
+    try:
+        detail = json.loads(exc.content).get("error", {}).get("message", "")
+    except (ValueError, AttributeError):
+        detail = ""
+    return f"HTTP {status} {detail}".strip()
+
+
+# --------------------------------------------------------------------------
+# manifest
+# --------------------------------------------------------------------------
+
+def load_manifest(path: Path) -> dict:
+    if not path.exists():
+        return {"version": 1, "files": {}}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError:
+        log.warning("Manifest at %s was corrupt; starting a fresh one.", path)
+        return {"version": 1, "files": {}}
+    data.setdefault("files", {})
+    return data
+
+
+def save_manifest(path: Path, manifest: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    manifest["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
+# --------------------------------------------------------------------------
+# main
+# --------------------------------------------------------------------------
+
+def sync(args, root: Path) -> int:
+    try:
+        course_id = resolve_course_id(args, root)
+    except ValueError as exc:
+        log.error("%s", exc)
+        return EXIT_ERROR
+
+    out_dir = Path(args.out) if Path(args.out).is_absolute() else root / args.out
+    manifest_path = root / "state" / "manifest.json"
+    manifest = load_manifest(manifest_path)
+    seen = manifest["files"]
+
+    try:
+        creds = load_credentials(root, allow_browser=not args.no_browser)
+    except PermissionError as exc:
+        log.error("%s", exc)
+        return EXIT_AUTH_REQUIRED
+    except FileNotFoundError as exc:
+        log.error("%s", exc)
+        return EXIT_ERROR
+
+    classroom = build("classroom", "v1", credentials=creds, cache_discovery=False)
+    drive = build("drive", "v3", credentials=creds, cache_discovery=False)
+
+    try:
+        course = classroom.courses().get(id=course_id).execute()
+        log.info("Course: %s (%s)", course.get("name", "?"), course_id)
+    except HttpError as exc:
+        log.error("Cannot read course %s: %s", course_id, _http_reason(exc))
+        return EXIT_ERROR
+
+    new_files = skipped = failed = 0
+
+    for label, title, date, drive_file in iter_attachments(classroom, course_id):
+        file_id = drive_file["id"]
+
+        if file_id in seen and (root / seen[file_id]["path"]).exists():
+            skipped += 1
+            continue
+
+        try:
+            meta = drive.files().get(
+                fileId=file_id,
+                fields="id,name,mimeType,size",
+                supportsAllDrives=True,
+            ).execute()
+        except HttpError as exc:
+            # This is the documented case where permission to read a post does
+            # not extend to its materials. Leave it out of the manifest so a
+            # later run retries if sharing is fixed.
+            log.warning("Skipping %s (%s): %s", drive_file.get("title", file_id),
+                        label, _http_reason(exc))
+            failed += 1
+            continue
+
+        mime = meta.get("mimeType", "")
+        if not args.all_files and not mime.startswith("image/"):
+            log.debug("Not an image, skipping: %s (%s)", meta.get("name"), mime)
+            continue
+
+        filename = build_filename(date, title, meta.get("name", file_id))
+        dest = out_dir / filename
+        if dest.exists():
+            dest = out_dir / f"{dest.stem}_{file_id[:6]}{dest.suffix}"
+
+        if args.dry_run:
+            log.info("[dry-run] would download %s -> %s", meta.get("name"), dest.name)
+            new_files += 1
+            continue
+
+        try:
+            size = download_drive_file(drive, file_id, dest)
+        except HttpError as exc:
+            log.warning("Download failed for %s: %s", meta.get("name"), _http_reason(exc))
+            failed += 1
+            continue
+
+        log.info("Downloaded %s (%s bytes)", dest.name, f"{size:,}")
+        seen[file_id] = {
+            "name": meta.get("name"),
+            "path": str(dest.relative_to(root)) if dest.is_relative_to(root) else str(dest),
+            "mime_type": mime,
+            "post_type": label,
+            "post_title": title[:200],
+            "post_date": date,
+            "downloaded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        new_files += 1
+
+    if not args.dry_run:
+        manifest["course_id"] = course_id
+        save_manifest(manifest_path, manifest)
+
+    log.info("Done. %d new, %d already had, %d unreadable.", new_files, skipped, failed)
+    return EXIT_OK
+
+
+def main(argv=None) -> int:
+    root = Path(__file__).resolve().parent
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--course-id", default=None,
+                        help="Numeric Classroom course ID. Overrides CLASSROOM_COURSE_ID "
+                             "and config.json.")
+    parser.add_argument("--out", default="images", help="Output folder (default: images)")
+    parser.add_argument("--all-files", action="store_true",
+                        help="Download every attachment, not just images")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Report what would be downloaded without writing files")
+    parser.add_argument("--no-browser", action="store_true",
+                        help="Fail instead of opening a consent window (use for scheduled runs)")
+    parser.add_argument("-v", "--verbose", action="store_true")
+    args = parser.parse_args(argv)
+
+    log_dir = root / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)-7s %(message)s",
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler(log_dir / "sync.log", encoding="utf-8"),
+        ],
+    )
+
+    try:
+        return sync(args, root)
+    except KeyboardInterrupt:
+        log.error("Interrupted.")
+        return EXIT_ERROR
+    except Exception:
+        log.exception("Unexpected failure")
+        return EXIT_ERROR
+
+
+if __name__ == "__main__":
+    sys.exit(main())

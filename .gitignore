@@ -1,0 +1,19 @@
+# Credentials -- never commit these.
+client_secret.json
+state/token.json
+
+# Identifies a real class; keep it out of the public repo.
+config.json
+
+# Offline-install helpers (regenerated as needed)
+wheel_urls.txt
+download_wheels.html
+wheels/
+
+# Runtime output
+state/
+images/
+logs/
+.venv/
+__pycache__/
+*.pyc
