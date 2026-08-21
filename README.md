@@ -1,191 +1,349 @@
 # Classroom Image Sync
 
-Downloads image attachments from a Google Classroom course to a local folder,
-incrementally, on a weekly schedule.
+Downloads image attachments from a Google Classroom course to a local folder.
+Runs weekly via Windows Task Scheduler and only fetches what is new.
 
-## Configure the course
+Google Classroom has no bulk image download. This fills that gap.
 
-The course ID is not stored in this repository. Copy the example config and
-fill it in:
+---
 
-```powershell
-Copy-Item config.example.json config.json
-```
+## Coming back to this after a long time? Read this first
 
-`config.json` is gitignored. The ID is the base64-decoded slug from your
-Classroom URL — for `classroom.google.com/c/<slug>`:
+The tool **already runs on its own**. You probably do not need to do anything.
 
-```powershell
-[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("<slug>"))
-```
+1. **`LOCAL_NOTES.md`** (this machine only, gitignored) has the actual course,
+   Google Cloud project, file paths and current status. Start there.
+2. To check it is still working, see [Is it working?](#is-it-working).
+3. To fix something, see [Troubleshooting](#troubleshooting).
+4. Only read [Rebuilding from scratch](#rebuilding-from-scratch) if you are
+   setting this up on a new machine or a new Google account.
 
-`--course-id` and the `CLASSROOM_COURSE_ID` environment variable both override
-the config file, in that order of precedence.
+**The single most important thing to know:** this repository being public, with
+GitHub Pages serving `docs/`, is what keeps the Google OAuth app authorised. It
+is not just source hosting. See [What depends on what](#what-depends-on-what)
+before deleting anything.
 
-## What it does
+---
 
-Lists every announcement, course-work material and assignment in the course,
-collects the Drive files attached to them, and downloads anything with an
-`image/*` MIME type. Downloaded Drive file IDs are recorded in
-`state/manifest.json`, so later runs only fetch what is new.
+## Where everything lives
 
-Files are named `<post-date>_<post-title>_<original-name>` so they sort
-chronologically.
+Everything sits in the project folder alongside this file.
 
-## Setup
+| Path | What it is | In git? |
+| --- | --- | --- |
+| `classroom_image_sync.py` | The whole program. One file. | yes |
+| `run_sync.ps1` | Wrapper the scheduled task calls | yes |
+| `docs/` | Home page + privacy policy served by GitHub Pages | yes — **load-bearing** |
+| `config.example.json` | Template for the course config | yes |
+| **`config.json`** | **Your course ID** | **no — identifies a real class** |
+| **`client_secret.json`** | **OAuth client credentials from Google** | **no — SECRET** |
+| **`state/token.json`** | **Your OAuth refresh token** | **no — SECRET** |
+| `state/manifest.json` | Drive file IDs already downloaded | no |
+| `images/` | The downloaded pictures | no |
+| `logs/sync.log` | Append-only run log | no |
+| `.venv/` | Python virtual environment | no |
+| `wheels/` | Offline install packages (see below) | no |
 
-### 1. Install — already done on this machine
+### The three sensitive files
+
+| File | What it is | If lost |
+| --- | --- | --- |
+| `client_secret.json` | Identifies the app to Google. Downloaded from the Cloud console. | Re-download from **Google Auth Platform → Clients**. Not regenerable by hand. |
+| `state/token.json` | Proof *you* authorised the app. Contains a refresh token. | Delete it and run the tool manually once; it re-authorises through the browser. |
+| `config.json` | The numeric course ID. | Copy `config.example.json` and decode the slug from the Classroom URL (below). |
+
+None are in git, and `.gitignore` enforces that. **Never commit them** — this
+repo is public.
+
+Anyone holding `state/token.json` can read your Classroom and Drive content.
+If it leaks, revoke access at
+[Google Account permissions](https://myaccount.google.com/permissions).
+
+---
+
+## Is it working?
 
 ```powershell
 cd C:\Users\yuryj\automated-trading\Classroom_Image_Sync
-python -m venv .venv
-.venv\Scripts\pip install -r requirements.txt
+
+# When did it last run, and did it succeed? (0 = success)
+Get-ScheduledTaskInfo -TaskName "Classroom Image Sync" |
+    Select-Object LastRunTime, LastTaskResult, NextRunTime
+
+# What did it actually do?
+Get-Content logs\sync.log -Tail 15
 ```
 
-**On this machine the second command fails**, and will keep failing. Microsoft
-Defender Network Protection blocks `files.pythonhosted.org`, enforced by a
-Microsoft Defender for Endpoint tenant the machine is onboarded to. It is not a
-network problem — a VPN does not help, and `Set-MpPreference` cannot override
-it because Tamper Protection is locked on by that tenant's policy.
+A healthy run ends with a line like `Done. 0 new, 77 already had, 0 unreadable.`
+`0 new` is normal — it means nothing was posted since last time.
 
-To reinstall or add a package, download the wheels through **Microsoft Edge**
-(the only process here not subject to the block) and install offline:
-
-```powershell
-# 1. Resolve URLs via pypi.org's JSON API, which is NOT blocked.
-#    Only files.pythonhosted.org is.
-# 2. Download them in Edge.
-# 3. Install without touching the network:
-.venv\Scripts\pip install --no-index --find-links=wheels -r requirements.txt
-```
-
-When picking wheels by hand, match the tag to CPython 3.13 / win_amd64:
-`py3-none-any`, `cp313-*-win_amd64`, or `cp3NN-abi3-win_amd64` where `NN <= 13`.
-`cryptography` is the trap — it ships as `cp311-abi3`, so a naive "newest cp313"
-filter misses it and can pick a macOS build.
-
-### 2. Create the OAuth client
-
-In the [Google Cloud console](https://console.cloud.google.com/). Google renamed
-this area to **Google Auth Platform** in 2025; older guides still say "OAuth
-consent screen" and "Credentials", which no longer appear in the left nav:
-
-| Old name | Current name |
-| --- | --- |
-| OAuth consent screen | Get started / Branding |
-| Scopes | **Data Access** |
-| Publish app | **Audience** -> Publish app |
-| Credentials -> OAuth client ID | **Clients** -> Create client |
-
-1. Create a project (any name).
-2. **APIs & Services -> Library**: enable both **Google Classroom API** and
-   **Google Drive API**.
-3. **Google Auth Platform -> Get started**: set an app name and support email,
-   Audience **External** (a personal Gmail cannot use Internal -- that requires
-   Workspace), then a contact email.
-4. **Audience -> Publish app.** It starts in Testing. Publishing is not
-   optional -- see below.
-5. **Data Access -> Add or remove scopes.** Paste these five into the manual
-   entry box:
-   - `https://www.googleapis.com/auth/classroom.courses.readonly`
-   - `https://www.googleapis.com/auth/classroom.announcements.readonly`
-   - `https://www.googleapis.com/auth/classroom.courseworkmaterials.readonly`
-   - `https://www.googleapis.com/auth/classroom.coursework.me.readonly`
-   - `https://www.googleapis.com/auth/drive.readonly`
-
-   Google flags these as sensitive/restricted. That is expected.
-6. **Clients -> Create client -> Desktop app.** Not Web: the script uses a
-   loopback redirect. Download the JSON and save it as `client_secret.json` in
-   this folder.
-
-`drive.readonly` is a *restricted* scope, and Google may resist publishing to
-production with one absent a verification review. There is no lesser Drive scope
-that works -- `drive.file` only sees files the app itself created, which never
-includes teacher-posted attachments.
-
-### 3. Authorise once, interactively
-
-```powershell
-.venv\Scripts\python.exe classroom_image_sync.py --dry-run
-```
-
-A browser window opens. You will see a **"Google hasn't verified this app"**
-warning — expected for a personal, unverified project. Choose **Advanced ->
-Go to (unsafe)** and grant access. The token is written to `state/token.json`
-and reused from then on.
-
-Drop `--dry-run` to actually download.
-
-## Why the app must be "In production"
-
-An OAuth consent screen left in **Testing** status expires refresh tokens
-**7 days after consent** — measured from the moment you consented, not from
-last use, so running more often does not extend it. A weekly job would sit
-exactly on that boundary and fail constantly. Publishing to production makes
-the token effectively permanent (it still dies after 6 months unused, on
-password change, or if you revoke access).
-
-Publishing does **not** require Google's verification review. Verification only
-matters for distributing the app to other people; for your own account the
-"unverified app" warning screen is the only consequence.
-
-## Scheduling it weekly
-
-```powershell
-$exe = "powershell.exe"
-$arg = '-NoProfile -ExecutionPolicy Bypass -File "C:\Users\yuryj\automated-trading\Classroom_Image_Sync\run_sync.ps1"'
-
-$action   = New-ScheduledTaskAction -Execute $exe -Argument $arg
-$trigger  = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At 8am
-$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable
-
-Register-ScheduledTask -TaskName "Classroom Image Sync" -Action $action `
-    -Trigger $trigger -Settings $settings `
-    -Description "Weekly download of Google Classroom image attachments"
-```
-
-`-StartWhenAvailable` matters on a personal machine: if the PC is off at 8am
-Sunday, the task runs at the next opportunity instead of being skipped.
-
-Run it once by hand to confirm:
+Run it right now without waiting for Sunday:
 
 ```powershell
 Start-ScheduledTask -TaskName "Classroom Image Sync"
 ```
 
-## Output
+---
 
+## Running it by hand
+
+```powershell
+cd C:\Users\yuryj\automated-trading\Classroom_Image_Sync
+
+.venv\Scripts\python.exe classroom_image_sync.py --dry-run   # preview only
+.venv\Scripts\python.exe classroom_image_sync.py             # actually download
 ```
-images/          downloaded pictures
-logs/sync.log    append-only run log
-state/manifest.json   Drive file IDs already fetched
-state/token.json      OAuth token  (secret)
-client_secret.json    OAuth client (secret)
-```
-
-Both secrets are covered by `.gitignore`. Do not commit them.
-
-## Options
 
 | Flag | Effect |
 | --- | --- |
-| `--course-id ID` | Target a different course |
+| `--dry-run` | List what would be fetched, write nothing |
+| `--course-id ID` | Target a different course (overrides `config.json`) |
 | `--out PATH` | Change the output folder |
 | `--all-files` | Download every attachment, not just images |
-| `--dry-run` | List what would be fetched, write nothing |
-| `--no-browser` | Never open a consent window; exit 2 if one is needed |
+| `--no-browser` | Never open a consent window; exit `2` if one is needed |
 | `-v` | Debug logging |
 
-Exit codes: `0` success, `1` error, `2` re-authorisation needed.
+Exit codes: `0` success · `1` error · `2` re-authorisation needed.
+
+The scheduled task always passes `--no-browser`, so it can never hang waiting
+for a consent window that nobody is there to click.
+
+Output files are named `<local-post-date>_<post-title>_<original-name>` so they
+sort chronologically.
+
+---
+
+## What depends on what
+
+Read this before deleting, renaming, or privatising anything.
+
+```
+   GitHub repo (PUBLIC)  ──serves──>  https://antipyrrhus.github.io/Classroom_Image_Sync/
+   antipyrrhus/                              index.html + privacy.html
+   Classroom_Image_Sync                              │
+                                                     │ Google requires a live homepage
+                                                     │ and privacy policy URL to keep
+                                                     ▼ the OAuth app "In production"
+                                        Google Auth Platform app
+                                                     │
+                                                     │ only a published app issues
+                                                     ▼ long-lived refresh tokens
+                                             state/token.json
+                                                     │
+                                                     ▼
+                                        the weekly job runs unattended
+```
+
+**Consequences if you break the top of that chain:** delete the repo, make it
+private, disable Pages, or remove `docs/`, and Google can treat the consent
+screen as incomplete and drop the app back to *Testing*. In Testing, refresh
+tokens expire **7 days after consent**. The weekly job would then fail every
+week, quietly, until someone re-authorises by hand.
+
+### Why "In production" matters so much
+
+Testing status expires refresh tokens 7 days from the moment you consent — not
+from last use, so running more often does not help. A weekly job sits exactly on
+that boundary. Publishing makes the token effectively permanent; it then only
+dies after 6 months unused, on password change, or if you revoke access.
+
+Publishing does **not** require Google's verification review. Verification only
+matters for distributing an app to other people. For your own account the
+"unverified app" warning screen is the entire consequence.
+
+There is no way around this. A service account would need Workspace
+domain-wide delegation, and this is a personal Gmail account.
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| Exit code `2`, log says re-authorisation needed | Token expired or revoked | Run by hand (no `--no-browser`) and approve in the browser |
+| Browser consent appears **every** run | App fell back to *Testing* status | Check **Audience** in the Cloud console. Verify the GitHub Pages URLs still load. |
+| `Cannot read course ... HTTP 404` | Wrong course ID, or you were removed from the class | Re-derive the ID (below); confirm you can still open the class in a browser |
+| Some files logged as `unreadable` | Google: permission to read a post does not imply permission to read its materials | Usually a sharing setting on that attachment. They are deliberately left out of the manifest, so a later run retries them automatically. |
+| `No course ID configured` | `config.json` missing | `Copy-Item config.example.json config.json` and fill it in |
+| `pip install` fails with an SSL error | Defender blocks the package CDN — see below | Use the offline install procedure |
+| Task shows `LastTaskResult` other than 0 | Check `logs\sync.log` for the real error | — |
+
+### Finding the course ID again
+
+The Classroom URL is `classroom.google.com/c/<slug>`. The slug is base64:
+
+```powershell
+[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("<slug>"))
+```
+
+That numeric result goes in `config.json` as `course_id`.
+
+### Re-authorising from scratch
+
+```powershell
+Remove-Item state\token.json
+.venv\Scripts\python.exe classroom_image_sync.py --dry-run
+```
+
+Approve in the browser. You will see **"Google hasn't verified this app"** —
+that is expected and correct for a personal app. Choose **Advanced → Go to
+Classroom Image Sync (unsafe)**.
+
+---
+
+## Installing packages on this machine
+
+**Normal `pip install` does not work here and never will.** Microsoft Defender
+Network Protection blocks `files.pythonhosted.org`, enforced by a Microsoft
+Defender for Endpoint tenant this machine is onboarded to.
+
+This is not a network fault. It fails identically in PowerShell and Python, a
+VPN makes no difference, and `Set-MpPreference` cannot override it because
+Tamper Protection is locked on by tenant policy and shows "managed by your
+administrator".
+
+**Microsoft Edge is the one process not subject to the block.** To install
+anything:
+
+1. Resolve the download URLs from `https://pypi.org/pypi/<package>/json`
+   (`pypi.org` is *not* blocked — only the CDN it points at).
+2. Download the `.whl` files in Edge into `wheels/`.
+3. Install without touching the network:
+
+```powershell
+.venv\Scripts\pip install --no-index --find-links=wheels -r requirements.txt
+```
+
+When choosing wheels by hand, match CPython 3.13 / win_amd64: `py3-none-any`,
+`cp313-*-win_amd64`, or `cp3NN-abi3-win_amd64` where `NN <= 13`. **`cryptography`
+is the trap** — it ships as `cp311-abi3`, so a naive "newest cp313" filter skips
+it and can silently pick a macOS build that fails at install time.
+
+---
 
 ## Known limitations
 
 - **Only attachments.** Images pasted directly into a post's body are not
-  attachments and are invisible to the Classroom API. Nothing here will catch
+  attachments and are invisible to the Classroom API. Nothing here can retrieve
   them.
-- **Images inside Docs/Slides** attached to a post are not extracted; only the
-  document itself is an attachment, and it is skipped unless `--all-files`.
-- **Materials can be unreadable.** Google's API docs note that permission to
-  read a post does not imply permission to read its materials. Such files are
-  logged as "unreadable" and deliberately left out of the manifest, so a later
-  run retries them if sharing is corrected.
+- **Images inside Docs/Slides are not extracted.** Only the document itself is
+  an attachment, and it is skipped unless you pass `--all-files`.
+- **Announcements, materials and assignments only.** Private comments and
+  student submissions are not read.
+
+---
+
+## Rebuilding from scratch
+
+Only needed for a new machine or a new Google account.
+
+### 1. Python environment
+
+```powershell
+python -m venv .venv
+.venv\Scripts\pip install -r requirements.txt
+```
+
+On this machine that second command fails — use the offline procedure above.
+
+### 2. Google Cloud project
+
+Google renamed this area to **Google Auth Platform** in 2025. Older guides say
+"OAuth consent screen" and "Credentials", which no longer exist in the nav:
+
+| Old name | Current name |
+| --- | --- |
+| OAuth consent screen | Get started / Branding |
+| Scopes | **Data Access** |
+| Publish app | **Audience → Publish app** |
+| Credentials → OAuth client ID | **Clients → Create client** |
+
+1. Create a project.
+2. **APIs & Services → Library**: enable **Google Classroom API** *and*
+   **Google Drive API**.
+3. **Get started**: app name, support email, Audience **External** (personal
+   Gmail cannot use Internal — that needs Workspace), contact email.
+4. **Branding**: set a homepage URL and privacy policy URL. These are
+   *mandatory* to publish. This repo's GitHub Pages provides them:
+   - `https://antipyrrhus.github.io/Classroom_Image_Sync/`
+   - `https://antipyrrhus.github.io/Classroom_Image_Sync/privacy.html`
+
+   Add `antipyrrhus.github.io` under **Authorized domains** (bare domain, no
+   `https://`, no path). **Do not upload an app logo** — that forces the app
+   into a verification review.
+5. **Audience → Publish app.**
+6. **Data Access → Add or remove scopes**, pasting all five:
+   ```
+   https://www.googleapis.com/auth/classroom.courses.readonly
+   https://www.googleapis.com/auth/classroom.announcements.readonly
+   https://www.googleapis.com/auth/classroom.courseworkmaterials.readonly
+   https://www.googleapis.com/auth/classroom.coursework.me.readonly
+   https://www.googleapis.com/auth/drive.readonly
+   ```
+   Google flags these sensitive/restricted. Expected.
+7. **Clients → Create client → Desktop app** (not Web — the script uses a
+   loopback redirect). Download the JSON, save as `client_secret.json` here.
+
+`drive.readonly` is a *restricted* scope and cannot be narrowed: `drive.file`
+only sees files the app itself created, which never includes teacher-posted
+attachments.
+
+### 3. Course config
+
+```powershell
+Copy-Item config.example.json config.json
+```
+
+Fill in `course_id` using the base64 decode above.
+
+### 4. Authorise
+
+```powershell
+.venv\Scripts\python.exe classroom_image_sync.py --dry-run
+```
+
+### 5. Schedule it
+
+```powershell
+$root = "C:\Users\yuryj\automated-trading\Classroom_Image_Sync"
+$arg  = '-NoProfile -ExecutionPolicy Bypass -File "' + $root + '\run_sync.ps1"'
+
+$action   = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arg -WorkingDirectory $root
+$trigger  = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At 8am
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable `
+              -ExecutionTimeLimit (New-TimeSpan -Hours 2)
+
+Register-ScheduledTask -TaskName "Classroom Image Sync" -Action $action `
+    -Trigger $trigger -Settings $settings -Force `
+    -Description "Weekly download of Google Classroom image attachments"
+```
+
+`-StartWhenAvailable` matters on a personal PC: if it is off at 8am Sunday the
+task runs at the next opportunity rather than being skipped entirely.
+
+To change the day or time, re-run with a different `-DaysOfWeek` / `-At`.
+To remove it: `Unregister-ScheduledTask -TaskName "Classroom Image Sync"`.
+
+---
+
+## Implementation notes
+
+Two Google behaviours the code works around. Both are load-bearing; do not
+"simplify" them away.
+
+**Scope aliasing.** Google grants
+`classroom.student-submissions.me.readonly` when you request
+`classroom.coursework.me.readonly` — the same permission under an older name.
+Two consequences: `oauthlib` raises on *any* difference between requested and
+granted scopes (hence `OAUTHLIB_RELAX_TOKEN_SCOPE`), and a naive
+"are all requested scopes present?" check against the stored token fails
+forever, forcing browser consent on every run and silently killing unattended
+scheduling. `SCOPE_ALIASES` and `has_required_scopes()` handle this.
+
+**UTC post dates.** `creationTime` is UTC, so slicing the string files an
+evening post under the next day. `post_local_date()` converts first.
+
+Also: Drive permits duplicate file names, so a single run can generate colliding
+targets. The code tracks names claimed during the run, not just what exists on
+disk — otherwise `--dry-run` (which writes nothing) would report a filename
+layout the real run would not produce.

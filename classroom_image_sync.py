@@ -38,6 +38,29 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
 ]
 
+# Google does not always grant back the exact scope string it was asked for.
+# classroom.coursework.me.readonly is returned as its legacy equivalent,
+# classroom.student-submissions.me.readonly -- the same underlying permission
+# under an older name. Two consequences, both handled here:
+#
+#   1. oauthlib raises on ANY difference between requested and granted scopes,
+#      so it has to be told to relax or the token exchange fails outright.
+#   2. A naive "are all requested scopes present?" check would fail forever
+#      against the stored token, forcing a browser consent on every run and
+#      quietly breaking unattended scheduling.
+os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
+
+SCOPE_ALIASES = {
+    "https://www.googleapis.com/auth/classroom.coursework.me.readonly":
+        "https://www.googleapis.com/auth/classroom.student-submissions.me.readonly",
+}
+
+
+def has_required_scopes(creds) -> bool:
+    """True if every required scope was granted, allowing for Google's aliases."""
+    granted = set(creds.scopes or [])
+    return all(s in granted or SCOPE_ALIASES.get(s) in granted for s in SCOPES)
+
 # The course ID identifies a real class, so it lives in a gitignored config file
 # rather than in the source. Nothing in the public repo points at an actual course.
 CONFIG_FILE = "config.json"
@@ -97,8 +120,10 @@ def load_credentials(root: Path, allow_browser: bool) -> Credentials:
             creds = None
 
     # A token minted before SCOPES changed will refresh happily but 403 on the
-    # new APIs, so treat a scope mismatch as "no token".
-    if creds and not creds.has_scopes(SCOPES):
+    # new APIs, so treat a genuine scope shortfall as "no token". Uses the
+    # alias-aware check: creds.has_scopes() would reject Google's substituted
+    # scope names and re-prompt on every single run.
+    if creds and not has_required_scopes(creds):
         log.warning("Stored token is missing required scopes; re-authorising.")
         creds = None
 
@@ -156,6 +181,22 @@ POST_SOURCES = [
 ]
 
 
+def post_local_date(post) -> str:
+    """Post date as YYYY-MM-DD in local time.
+
+    creationTime is UTC, so slicing the string puts an evening post under the
+    next day -- a 7pm post reads as tomorrow. Convert before formatting.
+    """
+    raw = post.get("creationTime") or ""
+    if not raw:
+        return "undated"
+    try:
+        return (datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                .astimezone().strftime("%Y-%m-%d"))
+    except ValueError:
+        return raw[:10] or "undated"
+
+
 def _paged(collection, field: str, **kwargs):
     """Yield every item across all pages of a Classroom list endpoint."""
     page_token = None
@@ -181,7 +222,7 @@ def iter_attachments(classroom, course_id: str):
         log.info("Found %d %s(s).", len(posts), label)
         for post in posts:
             title = post.get("title") or post.get("text") or ""
-            date = (post.get("creationTime") or "")[:10] or "undated"
+            date = post_local_date(post)
             for material in post.get("materials", []):
                 drive_file = material.get("driveFile", {}).get("driveFile")
                 if drive_file and drive_file.get("id"):
@@ -292,6 +333,10 @@ def sync(args, root: Path) -> int:
         return EXIT_ERROR
 
     new_files = skipped = failed = 0
+    # Names claimed during this run. Drive allows duplicate file names, and a
+    # dry run writes nothing, so dest.exists() alone would let two files claim
+    # the same target and misreport what a real run would produce.
+    planned: set[str] = set()
 
     for label, title, date, drive_file in iter_attachments(classroom, course_id):
         file_id = drive_file["id"]
@@ -322,8 +367,9 @@ def sync(args, root: Path) -> int:
 
         filename = build_filename(date, title, meta.get("name", file_id))
         dest = out_dir / filename
-        if dest.exists():
+        if dest.exists() or str(dest) in planned:
             dest = out_dir / f"{dest.stem}_{file_id[:6]}{dest.suffix}"
+        planned.add(str(dest))
 
         if args.dry_run:
             log.info("[dry-run] would download %s -> %s", meta.get("name"), dest.name)

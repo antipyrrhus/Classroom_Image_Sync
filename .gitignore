@@ -4,6 +4,7 @@ state/token.json
 
 # Identifies a real class; keep it out of the public repo.
 config.json
+LOCAL_NOTES.md
 
 # Offline-install helpers (regenerated as needed)
 wheel_urls.txt
