@@ -42,7 +42,6 @@ Everything sits in the project folder alongside this file.
 | `images/` | The downloaded pictures | no |
 | `logs/sync.log` | Append-only run log | no |
 | `.venv/` | Python virtual environment | no |
-| `wheels/` | Offline install packages (see below) | no |
 
 ### The three sensitive files
 
@@ -165,7 +164,7 @@ domain-wide delegation, and this is a personal Gmail account.
 | `Cannot read course ... HTTP 404` | Wrong course ID, or you were removed from the class | Re-derive the ID (below); confirm you can still open the class in a browser |
 | Some files logged as `unreadable` | Google: permission to read a post does not imply permission to read its materials | Usually a sharing setting on that attachment. They are deliberately left out of the manifest, so a later run retries them automatically. |
 | `No course ID configured` | `config.json` missing | `Copy-Item config.example.json config.json` and fill it in |
-| `pip install` fails with an SSL error | Defender blocks the package CDN — see below | Use the offline install procedure |
+| `pip install` fails with an SSL error | Network or certificate problem reaching PyPI | Retry; check no proxy/filtering is in the way |
 | Task shows `LastTaskResult` other than 0 | Check `logs\sync.log` for the real error | — |
 
 ### Finding the course ID again
@@ -193,31 +192,19 @@ Classroom Image Sync (unsafe)**.
 
 ## Installing packages on this machine
 
-**Normal `pip install` does not work here and never will.** Microsoft Defender
-Network Protection blocks `files.pythonhosted.org`, enforced by a Microsoft
-Defender for Endpoint tenant this machine is onboarded to.
+Plain `pip install -r requirements.txt` works. Nothing special is needed.
 
-This is not a network fault. It fails identically in PowerShell and Python, a
-VPN makes no difference, and `Set-MpPreference` cannot override it because
-Tamper Protection is locked on by tenant policy and shows "managed by your
-administrator".
-
-**Microsoft Edge is the one process not subject to the block.** To install
-anything:
-
-1. Resolve the download URLs from `https://pypi.org/pypi/<package>/json`
-   (`pypi.org` is *not* blocked — only the CDN it points at).
-2. Download the `.whl` files in Edge into `wheels/`.
-3. Install without touching the network:
-
-```powershell
-.venv\Scripts\pip install --no-index --find-links=wheels -r requirements.txt
-```
-
-When choosing wheels by hand, match CPython 3.13 / win_amd64: `py3-none-any`,
-`cp313-*-win_amd64`, or `cp3NN-abi3-win_amd64` where `NN <= 13`. **`cryptography`
-is the trap** — it ships as `cp311-abi3`, so a naive "newest cp313" filter skips
-it and can silently pick a macOS build that fails at install time.
+> **History.** Until the 2026-08-22 clean Windows reinstall this machine could
+> not reach `files.pythonhosted.org` at all: Microsoft Defender Network
+> Protection blocked it, enforced by a Defender for Endpoint tenant the machine
+> was onboarded to, with Tamper Protection locked on so it could not be
+> overridden. The workaround was to download wheels in Microsoft Edge (the one
+> unblocked process) and `pip install --no-index --find-links=wheels`. The
+> reinstall removed that tenant onboarding and the block with it, so the
+> `wheels/` folder and its helper files have been deleted. If package installs
+> ever start failing with SSL/connection errors again, check
+> `Get-MpPreference | Select-Object EnableNetworkProtection` (1 = blocking) —
+> that is what it looked like last time.
 
 ---
 
@@ -243,8 +230,6 @@ Only needed for a new machine or a new Google account.
 python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 ```
-
-On this machine that second command fails — use the offline procedure above.
 
 ### 2. Google Cloud project
 

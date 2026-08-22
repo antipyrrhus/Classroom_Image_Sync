@@ -6,11 +6,6 @@ state/token.json
 config.json
 LOCAL_NOTES.md
 
-# Offline-install helpers (regenerated as needed)
-wheel_urls.txt
-download_wheels.html
-wheels/
-
 # Runtime output
 state/
 images/
