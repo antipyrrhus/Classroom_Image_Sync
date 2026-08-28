@@ -64,6 +64,7 @@ def has_required_scopes(creds) -> bool:
 # The course ID identifies a real class, so it lives in a gitignored config file
 # rather than in the source. Nothing in the public repo points at an actual course.
 CONFIG_FILE = "config.json"
+DEFAULT_OUT_DIR = "images"
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -197,6 +198,30 @@ def post_local_date(post) -> str:
         return raw[:10] or "undated"
 
 
+def resolve_out_dir(args, root: Path) -> Path:
+    """Find the output folder from --out, the environment, or config.json.
+
+    Same precedence as resolve_course_id. The default stays "images" beside the
+    script so a fresh clone works with no config; a real install points this at
+    a photo library instead. Relative values are taken as relative to the
+    project folder, absolute ones are used as given.
+    """
+    value = args.out or os.environ.get("CLASSROOM_OUT_DIR", "").strip()
+
+    if not value:
+        path = root / CONFIG_FILE
+        if path.exists():
+            try:
+                value = str(json.loads(path.read_text(encoding="utf-8"))
+                            .get("out_dir", "")).strip()
+            except ValueError as exc:
+                raise ValueError(f"{path} is not valid JSON: {exc}") from exc
+
+    value = value or DEFAULT_OUT_DIR
+    out = Path(value).expanduser()
+    return out if out.is_absolute() else root / out
+
+
 def _paged(collection, field: str, **kwargs):
     """Yield every item across all pages of a Classroom list endpoint."""
     page_token = None
@@ -248,6 +273,20 @@ def build_filename(date: str, title: str, original: str) -> str:
     suffix = Path(original).suffix or ".bin"
     name = f"{date}_{slugify(title)}_{slugify(stem, 60)}"
     return name[:110] + suffix
+
+
+def date_subdir(date: str) -> Path:
+    """YYYY/MM folders from a YYYY-MM-DD post date.
+
+    Matches the year/month layout the photo library already uses. post_local_date
+    returns "undated" when a post has no creationTime, and a malformed date must
+    not scatter files into folders named after a fragment of it -- both land in
+    an "undated" folder instead.
+    """
+    parts = date.split("-")
+    if len(parts) >= 2 and len(parts[0]) == 4 and parts[0].isdigit() and parts[1].isdigit():
+        return Path(parts[0]) / f"{int(parts[1]):02d}"
+    return Path("undated")
 
 
 def download_drive_file(drive, file_id: str, dest: Path) -> int:
@@ -304,11 +343,12 @@ def save_manifest(path: Path, manifest: dict) -> None:
 def sync(args, root: Path) -> int:
     try:
         course_id = resolve_course_id(args, root)
+        out_dir = resolve_out_dir(args, root)
     except ValueError as exc:
         log.error("%s", exc)
         return EXIT_ERROR
 
-    out_dir = Path(args.out) if Path(args.out).is_absolute() else root / args.out
+    log.info("Saving to %s", out_dir)
     manifest_path = root / "state" / "manifest.json"
     manifest = load_manifest(manifest_path)
     seen = manifest["files"]
@@ -366,9 +406,10 @@ def sync(args, root: Path) -> int:
             continue
 
         filename = build_filename(date, title, meta.get("name", file_id))
-        dest = out_dir / filename
+        dest_dir = out_dir / date_subdir(date)
+        dest = dest_dir / filename
         if dest.exists() or str(dest) in planned:
-            dest = out_dir / f"{dest.stem}_{file_id[:6]}{dest.suffix}"
+            dest = dest_dir / f"{dest.stem}_{file_id[:6]}{dest.suffix}"
         planned.add(str(dest))
 
         if args.dry_run:
@@ -410,7 +451,9 @@ def main(argv=None) -> int:
     parser.add_argument("--course-id", default=None,
                         help="Numeric Classroom course ID. Overrides CLASSROOM_COURSE_ID "
                              "and config.json.")
-    parser.add_argument("--out", default="images", help="Output folder (default: images)")
+    parser.add_argument("--out", default=None,
+                        help="Output folder. Overrides CLASSROOM_OUT_DIR and "
+                             "config.json out_dir. Files land in <out>/YYYY/MM.")
     parser.add_argument("--all-files", action="store_true",
                         help="Download every attachment, not just images")
     parser.add_argument("--dry-run", action="store_true",

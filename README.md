@@ -35,13 +35,43 @@ Everything sits in the project folder alongside this file.
 | `run_sync.ps1` | Wrapper the scheduled task calls | yes |
 | `docs/` | Home page + privacy policy served by GitHub Pages | yes — **load-bearing** |
 | `config.example.json` | Template for the course config | yes |
-| **`config.json`** | **Your course ID** | **no — identifies a real class** |
+| **`config.json`** | **Your course ID and output folder** | **no — identifies a real class** |
 | **`client_secret.json`** | **OAuth client credentials from Google** | **no — SECRET** |
 | **`state/token.json`** | **Your OAuth refresh token** | **no — SECRET** |
 | `state/manifest.json` | Drive file IDs already downloaded | no |
-| `images/` | The downloaded pictures | no |
+| `images/` | Default output folder, used only when `out_dir` is unset | no |
 | `logs/sync.log` | Append-only run log | no |
 | `.venv/` | Python virtual environment | no |
+
+### Where the images go
+
+By default they land in `images/` beside the script. Point `out_dir` in
+`config.json` at somewhere else — a photo library, an external drive — and they
+go there instead:
+
+```json
+{
+  "course_id": "123456789012",
+  "out_dir": "E:/Photos/Classroom"
+}
+```
+
+Relative paths are relative to the project folder; absolute paths are used as
+given. Backslashes must be escaped in JSON (`"E:\\Photos"`) or just use forward
+slashes. `--out PATH` overrides it for one run, and `CLASSROOM_OUT_DIR`
+overrides `config.json` too. Precedence is `--out` > env > `config.json` >
+`images/`.
+
+**Files are filed into `<out_dir>/YYYY/MM` by post date**, so a picture from an
+announcement posted 2026-08-27 lands in `<out_dir>/2026/08/`. A post with no
+usable date goes to `<out_dir>/undated/`. The year/month split keeps the folder
+browsable as the course fills up, and matches the layout most photo libraries
+already use — so pointing `out_dir` straight at one merges cleanly instead of
+creating a parallel tree.
+
+Moving an existing collection means moving the files *and* rewriting the `path`
+values in `state/manifest.json` to match. The manifest is what stops repeat
+downloads; if the recorded path no longer exists, that file is fetched again.
 
 ### The three sensitive files
 
@@ -76,7 +106,7 @@ Get-Content logs\sync.log -Tail 15
 A healthy run ends with a line like `Done. 0 new, 77 already had, 0 unreadable.`
 `0 new` is normal — it means nothing was posted since last time.
 
-Run it right now without waiting for Sunday:
+Run it right now without waiting for the weekly run:
 
 ```powershell
 Start-ScheduledTask -TaskName "Classroom Image Sync"
@@ -97,7 +127,7 @@ cd C:\Users\yuryj\automated-trading\Classroom_Image_Sync
 | --- | --- |
 | `--dry-run` | List what would be fetched, write nothing |
 | `--course-id ID` | Target a different course (overrides `config.json`) |
-| `--out PATH` | Change the output folder |
+| `--out PATH` | Output folder for this run; overrides `config.json` |
 | `--all-files` | Download every attachment, not just images |
 | `--no-browser` | Never open a consent window; exit `2` if one is needed |
 | `-v` | Debug logging |
@@ -294,7 +324,7 @@ $root = "C:\Users\yuryj\automated-trading\Classroom_Image_Sync"
 $arg  = '-NoProfile -ExecutionPolicy Bypass -File "' + $root + '\run_sync.ps1"'
 
 $action   = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arg -WorkingDirectory $root
-$trigger  = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At 8am
+$trigger  = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Wednesday -At 10pm
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable `
               -ExecutionTimeLimit (New-TimeSpan -Hours 2)
 
@@ -303,7 +333,7 @@ Register-ScheduledTask -TaskName "Classroom Image Sync" -Action $action `
     -Description "Weekly download of Google Classroom image attachments"
 ```
 
-`-StartWhenAvailable` matters on a personal PC: if it is off at 8am Sunday the
+`-StartWhenAvailable` matters on a personal PC: if it is off at the scheduled time the
 task runs at the next opportunity rather than being skipped entirely.
 
 To change the day or time, re-run with a different `-DaysOfWeek` / `-At`.

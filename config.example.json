@@ -1,4 +1,6 @@
 {
-  "_comment": "Copy this file to config.json and fill in course_id. config.json is gitignored. To find the ID, take the slug from your Classroom URL (classroom.google.com/c/<slug>) and base64-decode it: [Convert]::FromBase64String('<slug>') in PowerShell yields the numeric course ID.",
-  "course_id": ""
+  "_comment": "Copy this file to config.json and fill it in. config.json is gitignored. To find course_id, take the slug from your Classroom URL (classroom.google.com/c/<slug>) and base64-decode it: [Convert]::FromBase64String('<slug>') in PowerShell yields the numeric course ID.",
+  "_out_dir": "Where to save images. Optional; defaults to 'images' beside the script. Relative paths are relative to the project folder, absolute ones are used as given. Files are filed into <out_dir>/YYYY/MM by post date. Backslashes must be escaped in JSON, or just use forward slashes.",
+  "course_id": "",
+  "out_dir": ""
 }
