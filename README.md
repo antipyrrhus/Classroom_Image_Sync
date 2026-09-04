@@ -1,7 +1,7 @@
 # Classroom Image Sync
 
 Downloads image attachments from a Google Classroom course to a local folder.
-Runs weekly via Windows Task Scheduler and only fetches what is new.
+Runs on a schedule via Windows Task Scheduler and only fetches what is new.
 
 Google Classroom has no bulk image download. This fills that gap.
 
@@ -106,7 +106,7 @@ Get-Content logs\sync.log -Tail 15
 A healthy run ends with a line like `Done. 0 new, 77 already had, 0 unreadable.`
 `0 new` is normal — it means nothing was posted since last time.
 
-Run it right now without waiting for the weekly run:
+Run it right now without waiting for the next scheduled run:
 
 ```powershell
 Start-ScheduledTask -TaskName "Classroom Image Sync"
@@ -160,21 +160,22 @@ Read this before deleting, renaming, or privatising anything.
                                              state/token.json
                                                      │
                                                      ▼
-                                        the weekly job runs unattended
+                                      the scheduled job runs unattended
 ```
 
 **Consequences if you break the top of that chain:** delete the repo, make it
 private, disable Pages, or remove `docs/`, and Google can treat the consent
 screen as incomplete and drop the app back to *Testing*. In Testing, refresh
-tokens expire **7 days after consent**. The weekly job would then fail every
-week, quietly, until someone re-authorises by hand.
+tokens expire **7 days after consent**. The scheduled job would then fail every
+run, quietly, until someone re-authorises by hand.
 
 ### Why "In production" matters so much
 
 Testing status expires refresh tokens 7 days from the moment you consent — not
-from last use, so running more often does not help. A weekly job sits exactly on
-that boundary. Publishing makes the token effectively permanent; it then only
-dies after 6 months unused, on password change, or if you revoke access.
+from last use, so running more often does not help: a daily job dies on day 7
+just as a weekly one does, it merely notices sooner. Publishing makes the token
+effectively permanent; it then only dies after 6 months unused, on password
+change, or if you revoke access.
 
 Publishing does **not** require Google's verification review. Verification only
 matters for distributing an app to other people. For your own account the
@@ -324,23 +325,30 @@ $root = "C:\Users\yuryj\automated-trading\Classroom_Image_Sync"
 $arg  = '-NoProfile -ExecutionPolicy Bypass -File "' + $root + '\run_sync.ps1"'
 
 $action   = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arg -WorkingDirectory $root
-$trigger  = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Thursday -At 10pm
+$trigger  = New-ScheduledTaskTrigger -Daily -At 10pm
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable `
               -ExecutionTimeLimit (New-TimeSpan -Hours 2)
 
 Register-ScheduledTask -TaskName "Classroom Image Sync" -Action $action `
     -Trigger $trigger -Settings $settings -Force `
-    -Description "Weekly download of Google Classroom image attachments"
+    -Description "Daily download of Google Classroom image attachments"
 ```
 
-`-StartWhenAvailable` matters on a personal PC: if it is off at the scheduled time the
-task runs at the next opportunity rather than being skipped entirely.
+`-StartWhenAvailable` matters on a personal PC: if it is off at the scheduled
+time the task runs at the next opportunity rather than being skipped entirely.
 
-To change the day or time, re-run with a different `-DaysOfWeek` / `-At`.
-Pick the day from when posts actually appear: a run scheduled just *before* the
-weekly post collects the previous week's, leaving the new batch to sit for
-almost seven days. A run with nothing new takes about three seconds, so if the
-posting day is irregular, running daily costs little.
+**Daily is usually the right cadence**, even for a course that posts once a
+week. A run with nothing new takes about three seconds -- it lists the posts,
+matches every attachment against the manifest and exits -- so the cost of
+checking is close to nothing, while the cost of guessing the wrong day is real:
+a weekly run scheduled just *before* the weekly post collects the previous
+week's and leaves the new batch sitting for almost seven days. Daily removes
+that failure mode entirely and caps the wait at 24 hours no matter when posts
+land.
+
+For a weekly trigger instead, use
+`-Weekly -DaysOfWeek Thursday` and pick the day from when posts actually
+appear.
 To remove it: `Unregister-ScheduledTask -TaskName "Classroom Image Sync"`.
 
 ---
