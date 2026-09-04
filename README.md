@@ -324,7 +324,7 @@ $root = "C:\Users\yuryj\automated-trading\Classroom_Image_Sync"
 $arg  = '-NoProfile -ExecutionPolicy Bypass -File "' + $root + '\run_sync.ps1"'
 
 $action   = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arg -WorkingDirectory $root
-$trigger  = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Wednesday -At 10pm
+$trigger  = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Thursday -At 10pm
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable `
               -ExecutionTimeLimit (New-TimeSpan -Hours 2)
 
@@ -337,6 +337,10 @@ Register-ScheduledTask -TaskName "Classroom Image Sync" -Action $action `
 task runs at the next opportunity rather than being skipped entirely.
 
 To change the day or time, re-run with a different `-DaysOfWeek` / `-At`.
+Pick the day from when posts actually appear: a run scheduled just *before* the
+weekly post collects the previous week's, leaving the new batch to sit for
+almost seven days. A run with nothing new takes about three seconds, so if the
+posting day is irregular, running daily costs little.
 To remove it: `Unregister-ScheduledTask -TaskName "Classroom Image Sync"`.
 
 ---
