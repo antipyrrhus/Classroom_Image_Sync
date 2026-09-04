@@ -165,17 +165,15 @@ Read this before deleting, renaming, or privatising anything.
 
 **Consequences if you break the top of that chain:** delete the repo, make it
 private, disable Pages, or remove `docs/`, and Google can treat the consent
-screen as incomplete and drop the app back to *Testing*. In Testing, refresh
-tokens expire **7 days after consent**. The scheduled job would then fail every
-run, quietly, until someone re-authorises by hand.
+screen as incomplete and drop the app back to *Testing*. The saved
+authorisation then stops working a week later, and the scheduled job quietly
+downloads nothing until someone re-approves it by hand.
 
 ### Why "In production" matters so much
 
-Testing status expires refresh tokens 7 days from the moment you consent — not
-from last use, so running more often does not help: a daily job dies on day 7
-just as a weekly one does, it merely notices sooner. Publishing makes the token
-effectively permanent; it then only dies after 6 months unused, on password
-change, or if you revoke access.
+In Testing, the saved authorisation stops working **7 days after you approve
+it**, no matter how often the tool runs — so changing the schedule never fixes
+an authorisation failure. Published, it lasts indefinitely.
 
 Publishing does **not** require Google's verification review. Verification only
 matters for distributing an app to other people. For your own account the
