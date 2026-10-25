@@ -32,7 +32,8 @@ Everything sits in the project folder alongside this file.
 | Path | What it is | In git? |
 | --- | --- | --- |
 | `classroom_image_sync.py` | The whole program. One file. | yes |
-| `run_sync.ps1` | Wrapper the scheduled task calls | yes |
+| `run_sync_background.py` | Windowless scheduled entry point, launched by `pythonw.exe` | yes |
+| `run_sync.ps1` | Optional console wrapper for manual runs | yes |
 | `docs/` | Home page + privacy policy served by GitHub Pages | yes — **load-bearing** |
 | `config.example.json` | Template for the course config | yes |
 | **`config.json`** | **Your course ID and output folder** | **no — identifies a real class** |
@@ -41,6 +42,7 @@ Everything sits in the project folder alongside this file.
 | `state/manifest.json` | Drive file IDs already downloaded | no |
 | `images/` | Default output folder, used only when `out_dir` is unset | no |
 | `logs/sync.log` | Append-only run log | no |
+| `logs/scheduled.log` | Scheduled console output and startup errors | no |
 | `.venv/` | Python virtual environment | no |
 
 ### Where the images go
@@ -136,6 +138,9 @@ Exit codes: `0` success · `1` error · `2` re-authorisation needed.
 
 The scheduled task always passes `--no-browser`, so it can never hang waiting
 for a consent window that nobody is there to click.
+It starts `.venv\Scripts\pythonw.exe` directly, which runs without a console
+window. The launcher returns the sync exit code to Task Scheduler and captures
+startup errors in `logs/scheduled.log`. Normal run details remain in `logs/sync.log`.
 
 Output files are named `<local-post-date>_<post-title>_<original-name>` so they
 sort chronologically.
@@ -320,9 +325,9 @@ Fill in `course_id` using the base64 decode above.
 
 ```powershell
 $root = "C:\Users\yuryj\automated-trading\Classroom_Image_Sync"
-$arg  = '-NoProfile -ExecutionPolicy Bypass -File "' + $root + '\run_sync.ps1"'
+$arg  = '"' + $root + '\run_sync_background.py"'
 
-$action   = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arg -WorkingDirectory $root
+$action   = New-ScheduledTaskAction -Execute "$root\.venv\Scripts\pythonw.exe" -Argument $arg -WorkingDirectory $root
 $trigger  = New-ScheduledTaskTrigger -Daily -At 10pm
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable `
               -ExecutionTimeLimit (New-TimeSpan -Hours 2)

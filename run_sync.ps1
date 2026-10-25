@@ -1,10 +1,9 @@
 <#
-    Task Scheduler wrapper for classroom_image_sync.py.
+    Optional console wrapper for classroom_image_sync.py.
 
-    Kept compatible with Windows PowerShell 5.1 so the scheduled task can call
-    the always-present powershell.exe rather than depending on pwsh being
-    installed. Runs with --no-browser: a scheduled run must never block on a
-    consent window nobody is there to click.
+    Kept compatible with Windows PowerShell 5.1 for manual use. Scheduled runs
+    use pythonw.exe with run_sync_background.py to avoid opening a console.
+    Runs with --no-browser so it cannot block on a consent window.
 #>
 
 $ErrorActionPreference = "Stop"
