@@ -328,8 +328,9 @@ $root = "C:\Users\yuryj\automated-trading\Classroom_Image_Sync"
 $arg  = '"' + $root + '\run_sync_background.py"'
 
 $action   = New-ScheduledTaskAction -Execute "$root\.venv\Scripts\pythonw.exe" -Argument $arg -WorkingDirectory $root
-$trigger  = New-ScheduledTaskTrigger -Daily -At 10pm
+$trigger  = New-ScheduledTaskTrigger -Daily -At 5pm
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable `
+              -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
               -ExecutionTimeLimit (New-TimeSpan -Hours 2)
 
 Register-ScheduledTask -TaskName "Classroom Image Sync" -Action $action `
@@ -339,6 +340,9 @@ Register-ScheduledTask -TaskName "Classroom Image Sync" -Action $action `
 
 `-StartWhenAvailable` matters on a personal PC: if it is off at the scheduled
 time the task runs at the next opportunity rather than being skipped entirely.
+`-AllowStartIfOnBatteries -DontStopIfGoingOnBatteries` matter on a laptop: by
+default Task Scheduler starts a task only on AC power and stops it when the
+charger is unplugged.
 
 **Daily is usually the right cadence**, even for a course that posts once a
 week. A run with nothing new takes about three seconds -- it lists the posts,
