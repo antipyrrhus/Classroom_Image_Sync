@@ -11,11 +11,13 @@ so a weekly scheduled run only fetches what is new.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 import os
 import re
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -69,6 +71,13 @@ DEFAULT_OUT_DIR = "images"
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_AUTH_REQUIRED = 2
+EXIT_LOCKED = 3
+
+# How long to wait for another program holding out_dir_lock. Kept under the
+# scheduled task's 2-hour limit so a long wait ends here, logged, rather than
+# being killed by Task Scheduler.
+LOCK_WAIT_MINUTES = 90
+LOCK_RETRY_SECONDS = 30
 
 log = logging.getLogger("classroom-sync")
 
@@ -220,6 +229,81 @@ def resolve_out_dir(args, root: Path) -> Path:
     value = value or DEFAULT_OUT_DIR
     out = Path(value).expanduser()
     return out if out.is_absolute() else root / out
+
+
+def resolve_lock_file(root: Path) -> Path | None:
+    """Find config.json out_dir_lock, or None when it is unset.
+
+    Set it when another program also works in out_dir and guards that work
+    with an exclusive lock file -- for example a backup that audits the folder
+    and must not see a half-written download. Relative values are taken as
+    relative to the project folder.
+    """
+    path = root / CONFIG_FILE
+    if not path.exists():
+        return None
+    try:
+        value = str(json.loads(path.read_text(encoding="utf-8"))
+                    .get("out_dir_lock", "")).strip()
+    except ValueError as exc:
+        raise ValueError(f"{path} is not valid JSON: {exc}") from exc
+    if not value:
+        return None
+    lock = Path(value).expanduser()
+    return lock if lock.is_absolute() else root / lock
+
+
+@contextlib.contextmanager
+def exclusive_lock(path: Path, wait_minutes: int = LOCK_WAIT_MINUTES):
+    """Hold path open with no sharing allowed for the duration of the block.
+
+    This is the same lock as a .NET FileShare.None open: whichever process
+    opens the file first owns it, and the other gets a sharing violation.
+    Windows closes the handle if this process dies, so a crash cannot leave a
+    stale lock behind. The file itself is left in place; deleting it could
+    remove a lock another process has just taken.
+    """
+    if os.name != "nt":
+        raise ValueError("out_dir_lock is only supported on Windows.")
+
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    create = kernel.CreateFileW
+    create.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                       ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    create.restype = wintypes.HANDLE
+    close = kernel.CloseHandle
+    close.argtypes, close.restype = [wintypes.HANDLE], wintypes.BOOL
+    invalid = wintypes.HANDLE(-1).value
+    generic_read_write, share_none, open_always, normal = 0xC0000000, 0, 4, 0x80
+    sharing_violation, lock_violation = 32, 33
+
+    deadline = time.monotonic() + wait_minutes * 60
+    waiting = False
+    while True:
+        handle = create(str(path), generic_read_write, share_none, None,
+                        open_always, normal, None)
+        if handle != invalid:
+            break
+        code = ctypes.get_last_error()
+        if code not in (sharing_violation, lock_violation):
+            raise OSError(f"Cannot open lock file {path}: {ctypes.FormatError(code)}")
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"{path} was still held by another program after "
+                               f"{wait_minutes} minutes.")
+        if not waiting:
+            log.info("Another program holds %s; waiting up to %d minutes.", path, wait_minutes)
+            waiting = True
+        time.sleep(LOCK_RETRY_SECONDS)
+
+    if waiting:
+        log.info("Lock acquired; continuing.")
+    try:
+        yield
+    finally:
+        close(handle)
 
 
 def _paged(collection, field: str, **kwargs):
@@ -475,7 +559,17 @@ def main(argv=None) -> int:
     )
 
     try:
-        return sync(args, root)
+        lock_file = None if args.dry_run else resolve_lock_file(root)
+    except ValueError as exc:
+        log.error("%s", exc)
+        return EXIT_ERROR
+
+    try:
+        with exclusive_lock(lock_file) if lock_file else contextlib.nullcontext():
+            return sync(args, root)
+    except TimeoutError as exc:
+        log.error("%s Nothing was downloaded; the next run will catch up.", exc)
+        return EXIT_LOCKED
     except KeyboardInterrupt:
         log.error("Interrupted.")
         return EXIT_ERROR

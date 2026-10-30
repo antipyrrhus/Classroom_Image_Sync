@@ -71,6 +71,24 @@ browsable as the course fills up, and matches the layout most photo libraries
 already use — so pointing `out_dir` straight at one merges cleanly instead of
 creating a parallel tree.
 
+**Sharing `out_dir` with a backup.** If another program audits or copies that
+folder, it can catch a download half-written (each file is written as `.part`
+and renamed when complete). When that program guards its own work with an
+exclusive lock file, point `out_dir_lock` at the same file:
+
+```json
+{
+  "out_dir": "E:/Photos/Library",
+  "out_dir_lock": "C:/Backup/state/maintenance.lock"
+}
+```
+
+The sync then holds that file exclusively from start to finish, so the two
+never run at once. If the other program has it, the sync waits up to 90
+minutes and then exits `3` without downloading; the next run catches up.
+This works with any lock taken as an exclusive open (`FileShare.None` in .NET,
+share mode 0 in Win32). Windows only. Dry runs skip the lock.
+
 Moving an existing collection means moving the files *and* rewriting the `path`
 values in `state/manifest.json` to match. The manifest is what stops repeat
 downloads; if the recorded path no longer exists, that file is fetched again.
@@ -134,7 +152,8 @@ cd C:\Users\yuryj\automated-trading\Classroom_Image_Sync
 | `--no-browser` | Never open a consent window; exit `2` if one is needed |
 | `-v` | Debug logging |
 
-Exit codes: `0` success · `1` error · `2` re-authorisation needed.
+Exit codes: `0` success · `1` error · `2` re-authorisation needed · `3`
+`out_dir_lock` still held by another program after 90 minutes.
 
 The scheduled task always passes `--no-browser`, so it can never hang waiting
 for a consent window that nobody is there to click.
@@ -197,6 +216,7 @@ domain-wide delegation, and this is a personal Gmail account.
 | Browser consent appears **every** run | App fell back to *Testing* status | Check **Audience** in the Cloud console. Verify the GitHub Pages URLs still load. |
 | `Cannot read course ... HTTP 404` | Wrong course ID, or you were removed from the class | Re-derive the ID (below); confirm you can still open the class in a browser |
 | Some files logged as `unreadable` | Google: permission to read a post does not imply permission to read its materials | Usually a sharing setting on that attachment. They are deliberately left out of the manifest, so a later run retries them automatically. |
+| Exit code `3`, log says the lock was still held | The program sharing `out_dir` ran for over 90 minutes | Nothing to fix if that run was expected to be long; the next sync catches up. Otherwise check why the other program is stuck. Never delete the lock file to force it. |
 | `No course ID configured` | `config.json` missing | `Copy-Item config.example.json config.json` and fill it in |
 | `pip install` fails with an SSL error | Network or certificate problem reaching PyPI | Retry; check no proxy/filtering is in the way |
 | Task shows `LastTaskResult` other than 0 | Check `logs\sync.log` for the real error | — |
