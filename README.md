@@ -359,7 +359,7 @@ Register-ScheduledTask -TaskName "Classroom Image Sync" -Action $action `
     -Description "Daily download of Google Classroom image attachments"
 ```
 
-**Daylight-saving note (November 19, 2026):** `New-ScheduledTaskTrigger -At` saves the start time with the UTC offset in force when the task is created, so the time shifts by an hour across daylight-saving changes. As of November 19, 2026 the installed task stores `16:00-05:00`, so it runs at **4:00 PM in winter** and 5:00 PM in summer. The `StartBoundary` line above saves a plain local 5:00 PM; re-run the block to correct it.
+**Daylight-saving note (November 19, 2026):** `New-ScheduledTaskTrigger -At` saves the start time with the UTC offset in force when the task is created, so the time shifts by an hour across daylight-saving changes. Until November 19, 2026 the installed task stored `16:00-05:00` and ran at 4:00 PM in winter. That evening it was re-registered with a plain local 5:00 PM (owner-approved; original XML in automated-trading/src/data/maintenance/task_backups/). The `StartBoundary` line above keeps a reinstall right.
 
 `-StartWhenAvailable` matters on a personal PC: if it is off at the scheduled
 time the task runs at the next opportunity rather than being skipped entirely.
