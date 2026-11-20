@@ -349,6 +349,7 @@ $arg  = '"' + $root + '\run_sync_background.py"'
 
 $action   = New-ScheduledTaskAction -Execute "$root\.venv\Scripts\pythonw.exe" -Argument $arg -WorkingDirectory $root
 $trigger  = New-ScheduledTaskTrigger -Daily -At 5pm
+$trigger.StartBoundary = (Get-Date '17:00').ToString('yyyy-MM-ddTHH:mm:ss')  # plain local time; see the note below
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable `
               -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
               -ExecutionTimeLimit (New-TimeSpan -Hours 2)
@@ -357,6 +358,8 @@ Register-ScheduledTask -TaskName "Classroom Image Sync" -Action $action `
     -Trigger $trigger -Settings $settings -Force `
     -Description "Daily download of Google Classroom image attachments"
 ```
+
+**Daylight-saving note (November 19, 2026):** `New-ScheduledTaskTrigger -At` saves the start time with the UTC offset in force when the task is created, so the time shifts by an hour across daylight-saving changes. As of November 19, 2026 the installed task stores `16:00-05:00`, so it runs at **4:00 PM in winter** and 5:00 PM in summer. The `StartBoundary` line above saves a plain local 5:00 PM; re-run the block to correct it.
 
 `-StartWhenAvailable` matters on a personal PC: if it is off at the scheduled
 time the task runs at the next opportunity rather than being skipped entirely.
